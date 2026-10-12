@@ -1,0 +1,89 @@
+name: Build iPhone IPA (unsigned)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+jobs:
+  build-ipa:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Prepare source (ZIP or extracted files)
+        run: |
+          set -euo pipefail
+          if [ -f VolumeScannerWithAgreement.zip ]; then
+            SOURCE_ARCHIVE=VolumeScannerWithAgreement.zip
+          elif [ -f VolumeScannerWithBreakouts.zip ]; then
+            SOURCE_ARCHIVE=VolumeScannerWithBreakouts.zip
+          elif [ -f VolumeScannerSource.zip ]; then
+            SOURCE_ARCHIVE=VolumeScannerSource.zip
+          else
+            SOURCE_ARCHIVE=""
+          fi
+          if [ -n "$SOURCE_ARCHIVE" ]; then
+            mkdir -p extracted-source
+            unzip -q "$SOURCE_ARCHIVE" -d extracted-source
+            echo "APP_ROOT=extracted-source" >> "$GITHUB_ENV"
+          else
+            echo "APP_ROOT=." >> "$GITHUB_ENV"
+          fi
+
+      - name: Install XcodeGen and generate project
+        run: |
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            brew install xcodegen
+          fi
+          cd "$APP_ROOT"
+          xcodegen generate --spec project.yml
+
+      - name: Verify calculation engine
+        run: |
+          cd "$APP_ROOT"
+          swiftc VolumeScanner/Models/VolumeMath.swift \
+            VolumeScanner/Breakouts/BreakoutModels.swift \
+            VolumeScanner/Breakouts/BreakoutMath.swift \
+            VolumeScanner/Agreement/AgreementMath.swift \
+            Tests/main.swift -o /tmp/volume-scanner-math-check
+          /tmp/volume-scanner-math-check
+
+      - name: Build for physical iPhones without signing
+        run: |
+          cd "$APP_ROOT"
+          xcodebuild \
+            -project VolumeScanner.xcodeproj \
+            -scheme VolumeScanner \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$PWD/build" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY='' \
+            build
+
+      - name: Package unsigned IPA for ESign
+        run: |
+          set -euo pipefail
+          cd "$APP_ROOT"
+          APP="$PWD/build/Build/Products/Release-iphoneos/VolumeScanner.app"
+          test -d "$APP"
+          mkdir -p Payload
+          ditto "$APP" "Payload/VolumeScanner.app"
+          zip -qry VolumeScanner-unsigned.ipa Payload
+          test -s VolumeScanner-unsigned.ipa
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: VolumeScanner-unsigned-IPA
+          path: ${{ env.APP_ROOT }}/VolumeScanner-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 30
